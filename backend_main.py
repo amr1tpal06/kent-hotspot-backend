@@ -41,7 +41,7 @@ app = FastAPI(
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:8080"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET"],
     allow_headers=["*"],
@@ -149,39 +149,35 @@ def hotspot_metrics(hotspot_id: int):
     Full metrics for one hotspot from vw_hotspot_metrics.
     Severity counts, Devon score, tier, persistence, quadrant.
     """
+    # Use vw_ranked_hotspots which joins all required tables
+    # Works with both physical-table and view-based schema versions
     rows = query(
         """
         SELECT
-            hm.analysis_run_id,
-            hm.hotspot_id,
-            hm.total_collisions,
-            hm.fatal_count,
-            hm.serious_count,
-            hm.slight_count,
-            hm.ksi_count,
-            hm.vru_casualties,
-            ROUND(hm.fatal_weighted::NUMERIC, 2)   AS fatal_weighted,
-            ROUND(hm.serious_weighted::NUMERIC, 2) AS serious_weighted,
-            ROUND(hm.slight_weighted::NUMERIC, 2)  AS slight_weighted,
-            ROUND(hm.devon_score::NUMERIC, 2)      AS devon_score,
-            ROUND(hm.ksi_proportion::NUMERIC, 4)   AS ksi_proportion,
-            hm.quadrant_classification,
-            hm.review_tier,
-            hm.persistence_label,
-            hm.methodology_note,
-            hl.road_reference,
-            hl.speed_limit,
-            hl.urban_rural,
-            ROUND(hl.centroid_latitude::NUMERIC, 5)  AS latitude,
-            ROUND(hl.centroid_longitude::NUMERIC, 5) AS longitude,
-            la.la_name
-        FROM vw_hotspot_metrics hm
-        JOIN hotspot_locations hl
-            ON hm.hotspot_id = hl.hotspot_id
-           AND hm.analysis_run_id = hl.analysis_run_id
-        LEFT JOIN local_authorities la
-            ON hl.la_id = la.la_id
-        WHERE hm.hotspot_id = %s
+            hotspot_id,
+            total_collisions,
+            fatal_count,
+            serious_count,
+            slight_count,
+            ksi_count,
+            vru_casualties,
+            ROUND(fatal_weighted::NUMERIC, 2)   AS fatal_weighted,
+            ROUND(serious_weighted::NUMERIC, 2) AS serious_weighted,
+            ROUND(slight_weighted::NUMERIC, 2)  AS slight_weighted,
+            ROUND(devon_score::NUMERIC, 2)      AS devon_score,
+            ROUND(ksi_proportion::NUMERIC, 4)   AS ksi_proportion,
+            quadrant_classification,
+            review_tier,
+            persistence_label,
+            methodology_note,
+            road_reference,
+            speed_limit,
+            urban_rural,
+            ROUND(centroid_latitude::NUMERIC, 5)  AS latitude,
+            ROUND(centroid_longitude::NUMERIC, 5) AS longitude,
+            la_name
+        FROM vw_ranked_hotspots
+        WHERE hotspot_id = %s
         """,
         (hotspot_id,)
     )
@@ -227,7 +223,7 @@ def hotspot_vehicles(hotspot_id: int):
         """
         SELECT
             hotspot_id,
-            vehicle_category,
+            category_label AS vehicle_category,
             vehicle_label,
             vehicle_count
         FROM vw_hotspot_vehicle_profile
@@ -300,6 +296,34 @@ def hotspot_timing(hotspot_id: int):
     )
 
 
+# ── ENDPOINT 8: multi-site trends (top N) ────────────────────
+@app.get("/hotspots/trends/top")
+def top_trends(n: int = Query(5, le=10)):
+    """
+    Annual KSI trends for top N hotspots by Devon score.
+    Used for multi-site trend chart on Temporal Analysis page.
+    """
+    return query(
+        """
+        SELECT
+            t.hotspot_id,
+            t.year,
+            t.ksi_count,
+            t.persistence_label,
+            r.hotspot_rank,
+            r.road_reference,
+            r.la_name
+        FROM vw_hotspot_trend t
+        JOIN vw_ranked_hotspots r
+            ON t.hotspot_id = r.hotspot_id
+           AND t.analysis_run_id = r.analysis_run_id
+        WHERE r.hotspot_rank <= %s
+        ORDER BY r.hotspot_rank, t.year
+        """,
+        (n,)
+    )
+
+
 # ── ENDPOINT 7: trend ─────────────────────────────────────────
 @app.get("/hotspots/{hotspot_id}/trend")
 def hotspot_trend(hotspot_id: int):
@@ -329,34 +353,6 @@ def hotspot_trend(hotspot_id: int):
     )
 
 
-# ── ENDPOINT 8: multi-site trends (top N) ────────────────────
-@app.get("/hotspots/trends/top")
-def top_trends(n: int = Query(5, le=10)):
-    """
-    Annual KSI trends for top N hotspots by Devon score.
-    Used for multi-site trend chart on Temporal Analysis page.
-    """
-    return query(
-        """
-        SELECT
-            t.hotspot_id,
-            t.year,
-            t.ksi_count,
-            t.persistence_label,
-            r.hotspot_rank,
-            r.road_reference,
-            r.la_name
-        FROM vw_hotspot_trend t
-        JOIN vw_ranked_hotspots r
-            ON t.hotspot_id = r.hotspot_id
-           AND t.analysis_run_id = r.analysis_run_id
-        WHERE r.hotspot_rank <= %s
-        ORDER BY r.hotspot_rank, t.year
-        """,
-        (n,)
-    )
-
-
 # ── ENDPOINT 9: KPI summary ───────────────────────────────────
 @app.get("/kpis")
 def kpis():
@@ -364,17 +360,30 @@ def kpis():
     Dashboard KPI card values.
     Derived from PostgreSQL tables directly.
     """
+    # KPIs derived from physical tables only (no view dependency)
+    # tier1_count and persistent_count use hotspot_locations columns
+    # populated by ETL (review_tier and persistence_label stored physically)
     rows = query(
         """
         SELECT
-            (SELECT COUNT(*) FROM accident_records)        AS total_collisions,
-            (SELECT COUNT(*) FROM hotspot_locations)       AS total_hotspots,
-            (SELECT COUNT(*) FROM hotspot_locations
-             WHERE review_tier ILIKE 'Tier 1%')            AS tier1_count,
-            (SELECT SUM(ksi_count)
-             FROM vw_hotspot_metrics)                      AS total_ksi_hotspots,
-            (SELECT COUNT(*) FROM hotspot_locations
-             WHERE persistence_label = 'Persistent')       AS persistent_count
+            (SELECT COUNT(*) FROM accident_records)             AS total_collisions,
+            (SELECT COUNT(*) FROM hotspot_locations)            AS total_hotspots,
+            (SELECT SUM(
+                (SELECT COUNT(*) FROM accident_hotspot_membership ahm
+                 JOIN accident_records ar ON ar.accident_id = ahm.accident_id
+                 WHERE ahm.hotspot_id = hl.hotspot_id
+                 AND ar.accident_severity IN (1,2))
+             FROM hotspot_locations hl)                         AS total_ksi_hotspots,
+            (SELECT COUNT(*) FROM (
+                SELECT DISTINCT hotspot_id
+                FROM vw_ranked_hotspots
+                WHERE review_tier ILIKE 'Tier 1%'
+            ) t)                                                AS tier1_count,
+            (SELECT COUNT(*) FROM (
+                SELECT DISTINCT hotspot_id
+                FROM vw_ranked_hotspots
+                WHERE persistence_label = 'Persistent'
+            ) t)                                                AS persistent_count
         """
     )
     return rows[0]
