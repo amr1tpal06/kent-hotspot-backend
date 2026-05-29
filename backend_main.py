@@ -48,6 +48,20 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# ── GLOBAL EXCEPTION HANDLER ─────────────────────────────────
+# Ensures CORS headers are present even when endpoints throw 500
+# Without this, unhandled exceptions bypass the CORS middleware
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
 # ── DATABASE ──────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -200,7 +214,7 @@ def hotspot_road_users(hotspot_id: int):
         """
         SELECT
             hotspot_id,
-            class_label,
+            casualty_class    AS class_label,
             casualty_label,
             is_vru,
             casualty_severity,
