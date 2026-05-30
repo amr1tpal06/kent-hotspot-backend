@@ -372,39 +372,36 @@ def hotspot_trend(hotspot_id: int):
 @app.get("/kpis")
 def kpis():
     """
-    Dashboard KPI card values.
-    Derived from PostgreSQL tables directly.
+    Dashboard KPI card values from physical tables.
+    No view dependency — fast and reliable.
     """
-    # KPIs derived from physical tables only (no view dependency)
-    # tier1_count and persistent_count use hotspot_locations columns
-    # populated by ETL (review_tier and persistence_label stored physically)
-    rows = query(
-        """
+    total_coll = query("SELECT COUNT(*) AS n FROM accident_records")[0]["n"]
+    total_hs   = query("SELECT COUNT(*) AS n FROM hotspot_locations")[0]["n"]
+
+    # KSI count from membership + accident severity
+    ksi = query("""
+        SELECT COUNT(*) AS n
+        FROM accident_hotspot_membership ahm
+        JOIN accident_records ar ON ar.accident_id = ahm.accident_id
+        WHERE ar.accident_severity IN (1, 2)
+    """)[0]["n"]
+
+    # Tier 1 and Persistent from vw_hotspot_metrics (derived view)
+    tiers = query("""
         SELECT
-            (SELECT COUNT(*) FROM accident_records)             AS total_collisions,
-            (SELECT COUNT(*) FROM hotspot_locations)            AS total_hotspots,
-            (SELECT SUM(
-                (SELECT COUNT(*) FROM accident_hotspot_membership ahm
-                 JOIN accident_records ar ON ar.accident_id = ahm.accident_id
-                 WHERE ahm.hotspot_id = hl.hotspot_id
-                 AND ar.accident_severity IN (1,2))
-             FROM hotspot_locations hl)                         AS total_ksi_hotspots,
-            (SELECT COUNT(*) FROM (
-                SELECT DISTINCT hotspot_id
-                FROM vw_ranked_hotspots
-                WHERE review_tier ILIKE 'Tier 1%'
-            ) t)                                                AS tier1_count,
-            (SELECT COUNT(*) FROM (
-                SELECT DISTINCT hotspot_id
-                FROM vw_ranked_hotspots
-                WHERE persistence_label = 'Persistent'
-            ) t)                                                AS persistent_count
-        """
-    )
-    return rows[0]
+            SUM(CASE WHEN review_tier ILIKE 'Tier 1%' THEN 1 ELSE 0 END) AS tier1,
+            SUM(CASE WHEN persistence_label = 'Persistent'   THEN 1 ELSE 0 END) AS persistent
+        FROM vw_hotspot_metrics
+        WHERE analysis_run_id = (SELECT MAX(analysis_run_id) FROM analysis_runs)
+    """)[0]
 
-
-# ── ENDPOINT 10: validation ───────────────────────────────────
+    return {
+        "total_collisions": total_coll,
+        "total_hotspots":   total_hs,
+        "total_ksi_hotspots": ksi,
+        "tier1_count":      tiers["tier1"],
+        "persistent_count": tiers["persistent"],
+    }
 @app.get("/validation")
 def validation():
     """
