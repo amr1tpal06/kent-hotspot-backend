@@ -237,11 +237,11 @@ def hotspot_vehicles(hotspot_id: int):
     return query(
         """
         SELECT
-            hotspot_id,
-            category_label AS vehicle_category,
-            vehicle_label,
-            vehicle_count
-        FROM vw_hotspot_vehicle_profile
+    hotspot_id,
+    vehicle_category,
+    vehicle_label,
+    vehicle_count
+FROM vw_hotspot_vehicle_profile
         WHERE hotspot_id = %s
         ORDER BY vehicle_count DESC
         """,
